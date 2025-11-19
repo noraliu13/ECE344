@@ -25,6 +25,11 @@
 - [Lecture 16: Threads](#lecture-16-threads)
 - [Lecture 17: Thread Implementation](#lecture-17-thread-implementation)
 
+**Locks**
+- [Lecture 21: Locks](#lecture-21-locks)
+- [Lecture 22: Locks Implementation](#lecture-22-locks-implementation)
+
+
 
 # Lecture 1: Operating Systems
 
@@ -2046,3 +2051,244 @@ All threads serialize on the same lock, effectively running one at a time.
 
 **Guideline:**  
 Use mutexes only where necessary.
+
+---
+
+# Lecture 22: Locks Implementation 
+
+## Overview
+This lecture discusses software and hardware implementations of locks, issues with basic spin locks, and advanced mutex and read-write lock implementations for fairness and performance.
+
+## 1. Software Lock Basics
+- Initial naive software locks **fail Mutual Exclusion**:
+  - Two threads may pass through `lock()` simultaneously.
+- Software locks require:
+  - Atomic **loads and stores**.
+  - Sequential instruction execution (though modern hardware may reorder).
+
+### Classic Algorithms
+- **Peterson's Algorithm**
+- **Lamport's Bakery Algorithm**
+  - Number-based "first-come, first-served" approach.
+  - Not scalable for multiprocessor systems.
+
+## 2. Hardware Support: Compare-and-Swap (CAS)
+- CAS is an atomic instruction:  
+  ```c
+  int compare_and_swap(int* ptr, int old, int new);
+  ```
+- Returns the original value at ptr.
+- Changes value to new only if current value equals old.
+
+**Example Lock Implementation: Spin Lock**
+```c
+while (compare_and_swap(&lock, 0, 1) != 0) {
+    // busy-wait
+}
+```
+- Atomicity ensures only one thread acquires the lock.
+- Other threads spin until lock is released.
+
+## Problems with Basic Spin Locks
+- **Busy-waiting wastes CPU.**
+- **Inefficient on single-core systems.**
+- Needs `yield()` to avoid spinning when the lock holder is blocked.
+
+## Improving Spin Locks
+- Add `yield()` when lock acquisition fails.
+  - Reduces CPU waste.
+- **Problem: Thundering Herd**
+  - Multiple threads wake up simultaneously, all attempt the lock.
+  - Only one succeeds → wasted attempts.
+  - Unfair: no guaranteed order of lock acquisition.
+
+## Fair Mutex Implementation
+- **Wait queue approach**:
+  1. Threads failing to acquire the lock add themselves to the queue and sleep.
+  2. Unlock operation wakes **exactly one thread** from the queue.
+- **Uses a spin lock (guard)** to protect the queue from data races.
+- **Transfers lock to the next thread safely.**
+- **Issues addressed**:
+  - **Lost wakeup:** a thread sleeps and never wakes; guard ensures atomicity.
+  - **Wrong thread acquires lock:** queue order enforces fairness.
+
+## Fair Mutex Using Guard Variable
+
+### Structure
+```c
+typedef struct {
+    int lock;     // mutex state: 0 = unlocked, 1 = locked
+    int guard;    // spin lock to protect shared state
+    queue_t *q;   // wait queue for threads
+} mutex_t;
+```
+
+## Lock Function
+```c
+void lock(mutex_t *m) {
+    // Acquire guard spin lock
+    while (compare_and_swap(m->guard, 0, 1)); // lock(&m->guard);
+
+    if (m->lock == 0) {
+        // Lock is free → acquire it
+        m->lock = 1;
+        m->guard = 0; // release guard unlock(&m->guard);
+    } else {
+        // Lock is held → enqueue thread and sleep
+        enqueue(m->q, self);
+        m->guard = 0; // release guard before sleeping unlock(&m->guard);
+        thread_sleep(); // lock will be transferred on wakeup
+    }
+}
+```
+
+## Unlock Function
+
+```c
+void unlock(mutex_t *m) {
+    // Acquire guard spin lock
+    while (compare_and_swap(m->guard, 0, 1)); // lock(&m->guard);
+
+    if (queue_empty(m->q)) {
+        // No waiting threads → release lock
+        m->lock = 0;
+    } else {
+        // Transfer lock directly to next thread
+        thread_wakeup(dequeue(m->q));
+    }
+
+    m->guard = 0; // release guard unlock(&m->guard);
+}
+```
+
+## Step-by-Step Example: T1 acquires lock first, T2 tries to acquire
+
+## Initial State
+
+| Thread | Action           | Lock | Guard | Queue |
+|--------|-----------------|------|-------|-------|
+| T1     | About to lock    | 0    | 0     | empty |
+| T2     | Wants lock       | 0    | 0     | empty |
+
+
+## Step 1: T1 Calls `lock(&m)`
+
+1. T1 acquires `guard` → spin lock succeeds (`guard = 1`).
+2. Checks `lock` → it is 0, so T1 sets `lock = 1` (acquires mutex).
+3. Releases guard (`guard = 0`).
+
+| Thread | Action          | Lock | Guard | Queue |
+|--------|----------------|------|-------|-------|
+| T1     | Holds mutex     | 1    | 0     | empty |
+| T2     | Waiting to lock | 1    | 0     | empty |
+
+
+## Step 2: T2 Calls `lock(&m)`
+
+1. T2 acquires `guard` → spin lock succeeds (`guard = 1`).
+2. Checks `lock` → it is 1 (held by T1).
+3. Adds itself to the queue (`m->queue` = T2).
+4. Releases guard (`guard = 0`).
+5. Calls `thread_sleep()` → T2 is now blocked.
+
+| Thread | Action          | Lock | Guard | Queue |
+|--------|----------------|------|-------|-------|
+| T1     | Holds mutex     | 1    | 0     | T2    |
+| T2     | Sleeping        | 1    | 0     | T2    |
+
+## Step 3: T1 Calls `unlock(&m)`
+
+1. T1 acquires guard → succeeds (`guard = 1`).
+2. Checks `queue_empty()` → false, T2 is in queue.
+3. Calls `thread_wakeup(dequeue(m->queue))` → wakes T2 **and transfers lock**.
+4. Releases guard (`guard = 0`).
+
+| Thread | Action       | Lock | Guard | Queue |
+|--------|-------------|------|-------|-------|
+| T1     | Finished    | 1 (transferred to T2) | 0 | empty |
+| T2     | Woken up    | 1    | 0     | empty |
+
+
+## Step 4: T2 Resumes
+
+1. T2 resumes from `thread_sleep()`.
+2. Already owns mutex (lock transferred by T1).
+3. Proceeds into the critical section.
+
+| Thread | Action          | Lock | Guard | Queue |
+|--------|----------------|------|-------|-------|
+| T2     | In critical section | 1 | 0 | empty |
+
+
+## Key Takeaways
+
+- **Guard spin lock** protects `lock` and `queue` from data races.
+- Prevents **lost wakeup**: T2 adds itself to queue before T1 tries to wake.
+- Ensures **fair transfer**: unlock hands off mutex to the first waiting thread.
+- Avoids busy waiting for the main lock.
+- Subtle edge case: If the woken thread is not yet asleep when unlock tries `thread_wakeup()`, retry is needed.  
+
+## Reader-Writer Lock (RWLock) and the Guard
+
+A **reader-writer lock (RWLock)** allows:
+
+- Multiple **readers** to access a shared resource simultaneously.
+- Only **one writer** at a time, excluding readers.
+
+To manage this safely, we use two locks:
+
+1. **`lock`** – Protects access to the actual shared resource.
+2. **`guard`** – Protects updates to the reader count (`nreader`).
+
+## The Reader Problem
+
+When multiple threads are reading:
+
+- Each reader must update `nreader` safely.
+- The **first reader** acquires the main `lock` to block writers.
+- The **last reader** releases the main `lock` to allow writers.
+- We need a separate `guard` to prevent **data races** on `nreader`.
+
+
+## Why All Readers Unlock the Guard
+
+- Each reader locks `guard` **only to increment or decrement `nreader`**.
+- After updating `nreader` (and acquiring `lock` if first reader), the reader **unlocks `guard`**.
+- This allows other threads to safely modify `nreader` while the current reader is still reading.
+- **Resource access is still protected** by `lock` until the last reader leaves.
+
+## What `unlock(&guard)` does
+
+- Simply releases the spin lock protecting `nreader`.
+- **Does not release the shared resource**.
+- Ensures only one thread updates the reader count at a time.
+
+
+## Analogy
+
+- **`guard`** = clipboard to track how many people are in the room.
+- **`lock`** = door to the room (blocks writers if readers are inside).
+
+**Steps:**
+
+1. Entering:
+   - Grab the clipboard (`lock(&guard)`).
+   - Write down your name (increment `nreader`).
+   - If first reader, lock the door (`lock(&lock)`).
+   - Put the clipboard back (`unlock(&guard)`) and start reading.
+
+2. While reading:
+   - Clipboard is free for others, but the door remains locked to block writers.
+
+3. Leaving:
+   - Grab the clipboard (`lock(&guard)`).
+   - Remove your name (decrement `nreader`).
+   - If last reader, unlock the door (`unlock(&lock)`).
+   - Put the clipboard back (`unlock(&guard)`).
+
+
+## Key Points
+
+- `guard` ensures **safe updates to reader count**.
+- `lock` ensures **exclusive access for writers** and **shared access for readers**.
+- Unlocking `guard` does **not affect the reader's access** to the resource.
