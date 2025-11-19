@@ -1938,3 +1938,111 @@ main thread waits for thread i -> adds *local to counter
 
 - Threads run in parallel, but their increments don’t touch `counter`.
 - Only main thread modifies `counter`, sequentially after each join.
+
+---
+
+# Lecture 21: Locks
+
+## Key Concepts
+### Data Race (Important Definition)
+A **data race** occurs when:
+1. Two threads **concurrently access the same memory**, and  
+2. **At least one** of those accesses is a **write**.
+
+A data race ⇒ **undefined behavior**, usually incorrect results.
+
+## 🔍 Why Data Races Happen
+### Example: `counter++`
+Even though it looks atomic in C, `counter++` → **three separate operations**:
+
+1. **Load** from memory  
+2. **Increment** (register operation)  
+3. **Store** back to memory
+
+Two threads can interleave these operations and break correctness.
+
+### GCC “Gimple” Representation
+The compiler transforms `counter++` into something like:
+```
+D1 = *counter // load
+D2 = D1 + 1 // increment
+*counter = D2 // store
+```
+
+Each line is **atomic**, but the entire increment is **not**.
+
+## Result of Interleaving
+For two threads incrementing a zero:
+
+- Only **one** ordering produces the correct result (`2`)
+- Most interleavings produce the wrong result (`1`)
+- With more threads → correctness becomes “miracle”-level unlikely
+
+## Fixing Data Races: `pthread_mutex_t`
+A **mutex** ensures **Mutual Exclusion**:  
+→ Only **one** thread can execute the protected code at a time.
+
+### Basic API
+```c
+pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
+
+// or dynamic init:
+pthread_mutex_init(&lock, NULL);
+
+// lock
+pthread_mutex_lock(&lock);
+
+// unlock
+pthread_mutex_unlock(&lock);
+
+// destroy (if dynamically created)
+pthread_mutex_destroy(&lock);
+```
+
+### Example: Fixing the Race
+```c
+pthread_mutex_lock(&lock);
+counter++;               // now safe
+pthread_mutex_unlock(&lock);
+```
+
+## Mutex Behavior and Correctness
+
+### Correctness With Locks
+When a shared update (e.g., `counter++`) is wrapped in a mutex lock/unlock, every thread is forced to execute the critical section one at a time.  
+This ensures every run returns the correct answer.
+
+
+## Mutex Caveats
+
+### Double Locking Causes Deadlock
+A thread that locks the same mutex twice without unlocking will deadlock.  
+All other threads attempting to acquire the same lock will also be blocked indefinitely.
+```c
+pthread_mutex_lock(&lock);
+pthread_mutex_lock(&lock);   // blocks forever waiting on itself
+```
+
+## Mutex Properties (Correctness Requirements)
+
+### 1. Mutual Exclusion
+Only one thread may be inside the critical section at any time.
+
+### 2. Liveness / Progress
+If multiple threads attempt to acquire the lock, one of them must eventually succeed.
+
+### 3. Bounded Waiting (No Starvation)
+A thread attempting to acquire the lock must not wait forever; each thread should eventually make progress.
+
+## Threads Do Not Automatically Make Code Faster
+
+Using threads with a mutex around very small operations (e.g., `counter++`) often makes a program:
+
+- **Correct**  
+- **But slower than a single-threaded implementation**
+
+**Reason:**  
+All threads serialize on the same lock, effectively running one at a time.
+
+**Guideline:**  
+Use mutexes only where necessary.
