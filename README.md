@@ -28,7 +28,7 @@
 **Locks**
 - [Lecture 21: Locks](#lecture-21-locks)
 - [Lecture 22: Locks Implementation](#lecture-22-locks-implementation)
-
+- [Lecture 23: Semaphores](#lecture-23-semaphores)
 
 
 # Lecture 1: Operating Systems
@@ -2292,3 +2292,182 @@ When multiple threads are reading:
 - `guard` ensures **safe updates to reader count**.
 - `lock` ensures **exclusive access for writers** and **shared access for readers**.
 - Unlocking `guard` does **not affect the reader's access** to the resource.
+
+---
+
+# Lecture 23: Semaphores
+
+## Locks and Mutexes
+
+**Purpose:** Prevent **data races**.  
+
+- **Mutex/lock** ensures **mutual exclusion**: only one thread executes a critical section at a time.  
+- This **prevents concurrent writes** to the same memory location.  
+
+> **Important:** Locks **do not ensure ordering** between threads — just exclusive access.
+
+
+### Example: Thread Ordering
+
+We have two threads:  
+
+```c
+void* print_first(void* arg) {
+    printf("This is first\n");
+}
+
+void* print_second(void* arg) {
+    printf("I'm going second\n");
+}
+```
+- Running this may print messages in any order.
+- `join()` can enforce order, but it forces serial execution, limiting parallelism.
+
+## Attempt Using Mutex
+pthread_mutex_t mtx = PTHREAD_MUTEX_INITIALIZER;
+
+```c
+void* print_second(void* arg) {
+    pthread_mutex_lock(&mtx);
+    pthread_mutex_lock(&mtx);
+    printf("I'm going second\n");
+    pthread_mutex_unlock(&mtx);
+}
+void* print_first(void* arg) {
+    printf("This is first\n");
+    pthread_mutex_unlock(&mtx);
+}
+```
+
+## Mutex Ordering Limitations
+
+- Works sometimes, but **undefined behavior** occurs if:
+  - Unlocking an unlocked mutex.
+  - Unlocking a mutex locked by another thread.
+- **Conclusion:** Mutexes alone are **not reliable for ordering**.
+
+## Semaphores
+
+- **Purpose:** Used for signaling and ordering between threads.
+- Can also be shared across processes, but mostly used for threads in this course.
+
+### Key Properties
+
+- **Value ≥ 0** (initial value set during creation)
+- **Operations (atomic):**
+  - `wait()` → decrement; block if value = 0
+  - `post()` → increment; unblock waiting threads
+
+### Analogy
+
+Semaphores are like **traffic lights**:  
+- `wait()` → stop until light is green  
+- `post()` → turn green for the next car
+
+## Example: Ordering Two Threads
+
+```c
+sem_t sem;
+sem_init(&sem, 0, 0); // initial value 0
+
+void* print_first(void* arg) {
+    printf("This is first\n");
+    sem_post(&sem);
+}
+
+void* print_second(void* arg) {
+    sem_wait(&sem);
+    printf("I'm going second\n");
+}
+```
+- Guarantees first prints before second, while allowing parallel execution after that.
+
+## Adding a Third Thread
+
+- To enforce order with three threads, **a second semaphore** is needed:
+
+```c
+sem_t sem2;
+sem_init(&sem2, 0, 0);
+
+void* print_third(void* arg) {
+    sem_wait(&sem2);
+    printf("I'm last\n");
+}
+```
+- Place `sem_post(&sem2)` after `print_second()` to ensure the proper sequence.
+
+## Mutex vs Semaphore
+
+| Feature        | Mutex                        | Semaphore                     |
+|----------------|------------------------------|-------------------------------|
+| Use            | Protect shared data           | Enforce ordering or resources |
+| Operations     | `lock()` / `unlock()`         | `wait()` / `post()`           |
+| Initial Value  | Not relevant                 | Critical (≥0)                 |
+| Behavior       | Exclusive access             | Counts available resources    |
+
+**Rule of thumb:**
+- Use **mutexes** for data races  
+- Use **semaphores** for thread ordering  
+
+## Thread Safety
+
+- Functions may internally split into **multiple system calls**.  
+- Example: `printf()` may execute multiple writes.  
+- Without locks, outputs may **interleave between threads**.  
+- **Solution:** Use mutexes to ensure **atomic execution** of non-thread-safe functions.
+
+## Producer-Consumer Example
+
+### Problem Setup
+- Circular buffer shared between multiple producer and consumer threads.  
+- Race conditions occur if:
+  - Consumers read **empty slots**  
+  - Producers write **filled slots**
+
+### Solution: Semaphores
+
+- **`filled_slots`** → counts slots with data  
+  - Consumers `wait(filled_slots)`  
+  - Producers `post(filled_slots)`
+
+- **`empty_slots`** → counts available empty slots  
+  - Producers `wait(empty_slots)`  
+  - Consumers `post(empty_slots)`
+
+### Initial Values
+- `filled_slots = 0` → no data initially  
+- `empty_slots = buffer_size` → all slots empty initially
+
+### Producer Code
+
+```c
+wait(empty_slots);    // wait for empty slot
+fill_slot();          // add data
+post(filled_slots);   // signal slot filled
+```
+### Consumer Code
+
+```c
+wait(filled_slots);   // wait for filled slot
+empty_slot();         // consume data
+post(empty_slots);    // signal slot empty
+```
+
+### Analogy
+
+**Parking lot analogy:**
+
+- `empty_slots` → free parking spots  
+- `filled_slots` → cars parked  
+
+This ensures **orderly access without stopping concurrency**.
+
+### Key Takeaways
+
+- **Mutexes** → prevent data races, exclusive access  
+- **Semaphores** → ordering and resource counting  
+- Thread-safe functions are essential; otherwise, use mutexes  
+
+**In producer-consumer problems:**  
+- Use semaphores to prevent **overwriting** or **reading empty slots**
